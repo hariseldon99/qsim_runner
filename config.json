@@ -1,0 +1,9 @@
+{
+  "solver": "mesolve",
+  "use_jax": true,
+  "dt": 0.01,
+  "t_final": 10.0,
+  "checkpoint_interval": 100,
+  "trajectory_interval": 50,
+  "method": "adams"
+}
