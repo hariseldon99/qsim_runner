@@ -26,7 +26,8 @@ class QSimBase:
         self.traj_dir = "trajectories"
         os.makedirs(self.check_dir, exist_ok=True)
         os.makedirs(self.traj_dir, exist_ok=True)
-        self.state = eval(self.topo["initial_state"], {"basis": basis})
+        # Allow initial_state expressions to call tensor(...)
+        self.state = eval(self.topo["initial_state"], {"basis": basis, "tensor": qutip.tensor})
         self.H = self._build_hamiltonian()
         self.use_jax = self.config.get("use_jax", False) and HAS_JAX
         self.method = self.config.get("method", "adams")
@@ -36,8 +37,17 @@ class QSimBase:
         for expr, deps in self.topo["hamiltonian"]:
             locs = {d: getattr(qutip, d)() for d in deps}
             H_parts.append(eval(expr, locs))
-        return sum(H_parts)
-    
+        # If a single part, return it directly (works for list-form TD Hamiltonians)
+        if len(H_parts) == 1:
+            return H_parts[0]
+        # Otherwise, only sum pure static Qobjs
+        if all(isinstance(p, Qobj) for p in H_parts):
+            H_tot = 0
+            for p in H_parts:
+                H_tot = H_tot + p
+            return H_tot
+        raise TypeError("Hamiltonian parts are mixed; cannot sum non-Qobj parts.")
+
     def set_simulation_name(self, name):
         """Set a base simulation name (without extension) used for checkpoint files."""
         if name.endswith(".cpt"):
@@ -201,9 +211,8 @@ if __name__ == "__main__":
 
     # initial state: all spins up in sz (|0> for each qubit). Build an expression
     # that uses only `basis` (it will be eval'd inside QSimBase with {"basis": basis}).
-    init_expr = "basis(2,0)"
-    for _ in range(N - 1):
-        init_expr += ".tensor(basis(2,0))"
+    # Build an eval-friendly expression that uses tensor(...)
+    init_expr = "tensor(" + ", ".join(["basis(2,0)"] * N) + ")"
 
     # also build a concrete psi0 Qobj for inclusion in the pickle (used as fallback)
     psi0 = qutip.tensor(*([qutip.basis(2, 0)] * N))
