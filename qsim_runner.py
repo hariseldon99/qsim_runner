@@ -37,7 +37,60 @@ class QSimBase:
             locs = {d: getattr(qutip, d)() for d in deps}
             H_parts.append(eval(expr, locs))
         return sum(H_parts)
+    
+    def set_simulation_name(self, name):
+        """Set a base simulation name (without extension) used for checkpoint files."""
+        if name.endswith(".cpt"):
+            name = name[:-4]
+        object.__setattr__(self, "_sim_name", name)
 
+    def _get_sim_name(self):
+        # prefer explicit attribute, then config, then ask the user
+        if hasattr(self, "_sim_name") and getattr(self, "_sim_name"):
+            return getattr(self, "_sim_name")
+        cfg_name = self.config.get("sim_name") if hasattr(self, "config") else None
+        if cfg_name:
+            if cfg_name.endswith(".cpt"):
+                cfg_name = cfg_name[:-4]
+            object.__setattr__(self, "_sim_name", cfg_name)
+            return cfg_name
+        # interactive fallback
+        try:
+            name = input("Enter simulation name for checkpoints (no extension): ").strip()
+        except Exception:
+            name = "simulation"
+        if not name:
+            name = "simulation"
+        object.__setattr__(self, "_sim_name", name)
+        return name
+
+    def __getattribute__(self, name):
+        # Intercept checkpoint methods to use a single named .cpt file per simulation
+        if name in ("_save_checkpoint", "_load_checkpoint"):
+            # avoid recursion by fetching needed attrs with object.__getattribute__
+            def _save(step, state):
+                sim = object.__getattribute__(self, "_get_sim_name")()
+                check_dir = object.__getattribute__(self, "check_dir")
+                os.makedirs(check_dir, exist_ok=True)
+                path = os.path.join(check_dir, f"{sim}.cpt")
+                with open(path, "wb") as f:
+                    pickle.dump((step, state), f)
+
+            def _load():
+                sim = object.__getattribute__(self, "_get_sim_name")()
+                check_dir = object.__getattribute__(self, "check_dir")
+                path = os.path.join(check_dir, f"{sim}.cpt")
+                if not os.path.exists(path):
+                    # match previous behavior: return (0, self.state) when no checkpoint
+                    return 0, object.__getattribute__(self, "state")
+                with open(path, "rb") as f:
+                    step, state = pickle.load(f)
+                return step, state
+
+            return _save if name == "_save_checkpoint" else _load
+    
+        return object.__getattribute__(self, name)
+    
     def _save_checkpoint(self, step, state):
         path = os.path.join(self.check_dir, f"chk_{step:05d}.pkl")
         with open(path, "wb") as f:
@@ -90,3 +143,90 @@ class QSimPropagator(QSimBase):
                 state = U_accum @ self.state
                 self._save_trajectory(i, state)
         self.final_propagator = U_accum
+
+
+if __name__ == "__main__":
+    # Example: N=8 sinusoidally driven transverse-field Ising model (TFIM)
+    N = 8
+    J = 1.0
+    h0 = 0.5           # static offset of transverse field
+    h_amp = 0.8        # drive amplitude
+    omega = 2.0 * np.pi / 5.0
+
+    # simulation config
+    config = {
+        "dt": 0.05,
+        "t_final": 5.0,
+        "checkpoint_interval": 20,
+        "trajectory_interval": 50,
+        "sim_name": "tfim_N8",
+    }
+    config_file = "qsim_config.json"
+    topo_file = "tfim_topology.pkl"
+
+    # build many-body operators
+    sx = qutip.sigmax()
+    sz = qutip.sigmaz()
+    qI = qutip.qeye(2)
+
+    def pauli_sum(op):
+        """Return sum_j (I x ... x op_j x ... x I)"""
+        terms = []
+        for j in range(N):
+            ops = [qI] * N
+            ops[j] = op
+            terms.append(qutip.tensor(*ops))
+        return sum(terms)
+
+    # Ising interaction (nearest-neighbour, open chain)
+    H_zz = sum(
+        qutip.tensor(*([qI] * (i) + [sz, sz] + [qI] * (N - i - 2)))
+        for i in range(N - 1)
+    )
+    H_zz = -J * H_zz
+
+    # transverse field X sum
+    H_x = -pauli_sum(sx)
+
+    # time-dependent prefactor for H_x
+    def drive(t, args):
+        return h0 + h_amp * np.sin(omega * t)
+
+    # make a zero-arg factory on the qutip module so _build_hamiltonian can call it
+    def _get_H_factory():
+        # return a list suitable for qutip.mesolve: [H_static, [H1, time_func]]
+        return [H_zz, [H_x, drive]]
+
+    setattr(qutip, "get_H", _get_H_factory)
+
+    # initial state: all spins up in sz (|0> for each qubit). Build an expression
+    # that uses only `basis` (it will be eval'd inside QSimBase with {"basis": basis}).
+    init_expr = "basis(2,0)"
+    for _ in range(N - 1):
+        init_expr += ".tensor(basis(2,0))"
+
+    # also build a concrete psi0 Qobj for inclusion in the pickle (used as fallback)
+    psi0 = qutip.tensor(*([qutip.basis(2, 0)] * N))
+
+    # topology dict expected by QSimBase
+    topo = {
+        "H": H_zz,  # a static placeholder (will be replaced by _build_hamiltonian)
+        "psi0": psi0,
+        "initial_state": init_expr,
+        # provide a hamiltonian list where expr 'get_H' will be eval'd; deps tells
+        # _build_hamiltonian to call qutip.get_H() and make it available in eval
+        "hamiltonian": [("get_H", ["get_H"])],
+        "c_ops": [],  # no collapse operators for this example
+    }
+
+    # save config and topology to files
+    with open(config_file, "w") as f:
+        json.dump(config, f, indent=2)
+
+    with open(topo_file, "wb") as f:
+        pickle.dump(topo, f)
+
+    # run the mesolve simulation with checkpointing (start fresh)
+    sim = QSimMesolve(config_file, topo_file)
+    sim.set_simulation_name(config["sim_name"])
+    sim.run(resume=False)
