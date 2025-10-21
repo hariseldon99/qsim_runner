@@ -1,4 +1,5 @@
 import os
+import argparse
 import numpy as np
 import qutip
 from qsim_runner import QSimMesolve
@@ -42,18 +43,36 @@ def _get_H_factory():
     # [H_static, [H1, time_func]]
     return [H_zz, [H_x, drive]]
 
-# Make it available to QSimBase._build_hamiltonian()
+# Make it available to QSimBase._build_hamiltonian() BEFORE constructing the simulator
 setattr(qutip, "get_H", _get_H_factory)
 
-# Files produced by the original run
-config_file = "qsim_config.json"
-topo_file = "tfim_topology.pkl"
+def main():
+    parser = argparse.ArgumentParser(description="Resume or start a qsim run.")
+    parser.add_argument("--config", default="qsim_config.json", help="Path to config JSON")
+    parser.add_argument("--topo", default="tfim_topology.pkl", help="Path to topology pickle")
+    parser.add_argument("--sim-name", default=None, help="Override simulation name used for checkpoints")
+    parser.add_argument("--fresh", action="store_true", help="Start fresh (do not resume)")
+    args = parser.parse_args()
+
+    sim = QSimMesolve(args.config, args.topo)
+
+    # Determine sim name: CLI > config.sim_name > default
+    sim_name = args.sim_name or sim.config.get("sim_name") or "simulation"
+    sim.set_simulation_name(sim_name)
+
+    resume = not args.fresh
+    cpt_path = os.path.join("checkpoints", f"{sim_name}.cpt")
+
+    if resume and not os.path.exists(cpt_path):
+        print(f"No checkpoint found at {cpt_path}; starting fresh.")
+        resume = False
+    elif resume:
+        # Show the checkpoint step we will resume from
+        step, _state = sim._load_checkpoint()
+        print(f"Resuming '{sim_name}' from step {step} ({cpt_path}).")
+
+    sim.run(resume=resume)
+    print("Run complete.")
 
 if __name__ == "__main__":
-    # Resume from the single named checkpoint file (config.sim_name.cpt)
-    sim = QSimMesolve(config_file, topo_file)
-    # Optional: ensure the same simulation name is used
-    sim.set_simulation_name(sim.config.get("sim_name", "tfim_N8"))
-    # Resume=True (default) will load checkpoints/<sim_name>.cpt if present
-    sim.run(resume=True)
-    print("Resume complete.")
+    main()

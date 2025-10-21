@@ -116,8 +116,18 @@ class QSimBase:
         return step, state
 
     def _save_trajectory(self, step, state):
-        path = os.path.join(self.traj_dir, f"traj_{step:05d}.qobj")
-        state.save(path)
+        # Prefer QuTiP's qsave; fallback to pickle if unavailable.
+        base = os.path.join(self.traj_dir, f"traj_{step:05d}")
+        try:
+            qsave = getattr(qutip, "qsave", None)
+            if callable(qsave):
+                # qsave appends ".qu" automatically; paths are supported.
+                qsave(state, base)
+            else:
+                raise AttributeError("qutip.qsave not available")
+        except Exception:
+            with open(base + ".pkl", "wb") as f:
+                pickle.dump(state, f)
 
 
 class QSimMesolve(QSimBase):
@@ -139,7 +149,15 @@ class QSimMesolve(QSimBase):
 
 class QSimPropagator(QSimBase):
     def run(self, resume=True):
-        start, U_accum = self._load_checkpoint() if resume else (0, qutip.qeye(self.state.dims[0][0]))
+        if resume:
+            start, U_accum = self._load_checkpoint()
+            # If no checkpoint exists, _load_checkpoint returns the state (isket),
+            # so reset to identity on the full Hilbert space.
+            if not getattr(U_accum, "isoper", False):
+                start, U_accum = 0, qutip.qeye(self.state.shape[0])
+        else:
+            # Identity on the full Hilbert space, not just the first local dim.
+            start, U_accum = 0, qutip.qeye(self.state.shape[0])
         for i, t in enumerate(self.times[start:], start=start):
             if self.use_jax:
                 solver = qutip_jax.propagator

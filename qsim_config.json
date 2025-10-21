@@ -1,0 +1,7 @@
+{
+  "dt": 0.05,
+  "t_final": 5.0,
+  "checkpoint_interval": 20,
+  "trajectory_interval": 50,
+  "sim_name": "tfim_N8"
+}
